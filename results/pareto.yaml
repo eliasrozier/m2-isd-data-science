@@ -1,0 +1,6 @@
+# Your main Pareto front for the current milestone (update at every tag)
+quality: {column: FILL_ME, direction: max}      # e.g. mAP / max, wer / min
+cost:    {column: lat_p90_ms, direction: min}   # e.g. lat_p90_ms, rtf, energy_j_per_img
+budget:  FILL_ME                                # your real-time constraint, same unit as cost
+claimed_front: []                               # model values you claim are Pareto-optimal
+chosen: FILL_ME                                 # configuration used in your pipeline

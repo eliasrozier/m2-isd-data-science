@@ -1,0 +1,22 @@
+numpy>=2.0
+scipy
+pandas
+matplotlib
+scikit-learn
+pyyaml
+pytest
+pillow
+torch
+transformers>=5.0
+accelerate
+nvidia-ml-py       # GPU energy counter
+librosa
+soundfile
+hmmlearn>=0.3
+jiwer>=3.0
+# pip install --no-deps pyctcdecode   (its metadata would downgrade numpy)
+# pip install https://github.com/kpu/kenlm/archive/master.zip
+# live demo (laptop)
+fastapi
+uvicorn
+sherpa-onnx
