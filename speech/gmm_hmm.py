@@ -143,8 +143,22 @@ def train_word_models(train: dict[str, list[np.ndarray]], n_states: int = 5, n_m
     return WordModels(models, n_states, n_mix, time.perf_counter() - t0)
 
 
+
 def recognise_isolated(wm: WordModels, feats: np.ndarray, vocab: list[str]) -> str:
-    raise NotImplementedError("TODO(d1): return the word whose model gives the highest log-likelihood")
+    """Return the word with the highest acoustic log-likelihood."""
+
+    best_word = None
+    best_score = -np.inf
+
+    for word in vocab:
+        model = wm.models[word]
+        score = model.score(feats)
+
+        if score > best_score:
+            best_score = score
+            best_word = word
+
+    return best_word
 
 
 # --------------------------------------------------------------------------- #
@@ -176,8 +190,65 @@ class WordLoopDecoder:
     def _lm(self, u, v):
         return self.lm_weight * np.log(max(self.bigram[u].get(v, 1e-12), 1e-12)) + self.word_penalty
 
+    
     def _build(self):
-        raise NotImplementedError("TODO(d1): build the composite log transition matrix: within-word transitions + (word end -> word start) with lm_weight*log P(v|u) + word_penalty; start probabilities from P(v|<s>); mark entry transitions")
+        """Build the composite HMM transition matrix and start scores."""
+
+        S = self.S
+
+        # Log transition matrix: impossible transitions are -inf.
+        self.logA = np.full((S, S), -np.inf)
+
+        # Initial probabilities for the composite HMM.
+        self.logpi = np.full(S, -np.inf)
+
+        # Identify transitions that start a new word.
+        self.entry = np.zeros((S, S), dtype=bool)
+
+        # 1. Copy the internal transitions of each word HMM.
+        for word in self.vocab:
+            model = self.wm.models[word]
+            offset = self.offsets[word]
+            size = self.sizes[word]
+
+            with np.errstate(divide="ignore"):
+                log_trans = np.log(model.transmat_)
+
+            self.logA[
+                offset:offset + size,
+                offset:offset + size
+            ] = log_trans
+
+            # Initial probability: P(word | <s>) and HMM startprob.
+            with np.errstate(divide="ignore"):
+                log_start = np.log(model.startprob_)
+
+            self.logpi[offset:offset + size] = (
+                self._lm("<s>", word) + log_start
+            )
+
+        # 2. Connect final states to the first state of each word.
+        for prev_word in self.vocab:
+            prev_end = (
+                self.offsets[prev_word]
+                + self.sizes[prev_word] - 1
+            )
+
+            for next_word in self.vocab:
+                next_start = self.offsets[next_word]
+
+                transition_score = (
+                    self.exit_logp
+                    + self._lm(prev_word, next_word)
+                )
+
+                # Keep the best transition if two edges share a pair.
+                self.logA[prev_end, next_start] = max(
+                    self.logA[prev_end, next_start],
+                    transition_score
+                )
+
+                self.entry[prev_end, next_start] = True
 
     def emissions(self, feats: np.ndarray) -> np.ndarray:
         """(T, S) log b_s(o_t) concatenated over word models."""
@@ -187,14 +258,119 @@ class WordLoopDecoder:
     def decode(self, feats: np.ndarray, drop: tuple = ("sil",)) -> list[str]:
         return self.decode_emissions(self.emissions(feats), drop)
 
-    def decode_emissions(self, B: np.ndarray, drop: tuple = ("sil",)) -> list[str]:
-        """Viterbi on precomputed emissions (lets you sweep LM weights without recomputing GMMs)."""
-        raise NotImplementedError("TODO(d1): log-domain Viterbi over the composite HMM, end in a word-final state, backtrack, cut words at entry transitions, drop silence")
+    
+    def decode_emissions(self, B: np.ndarray,
+                        drop: tuple = ("sil",)) -> list[str]:
+        """Decode emissions using log-domain Viterbi."""
+
+        T, S = B.shape
+
+        if T == 0:
+            return []
+
+        # Viterbi scores and backpointers.
+        delta = np.full((T, S), -np.inf)
+        psi = np.zeros((T, S), dtype=int)
+
+        # 1. Initialisation.
+        delta[0] = self.logpi + B[0]
+
+        # 2. Recursion.
+        for t in range(1, T):
+            scores = delta[t - 1][:, None] + self.logA
+
+            psi[t] = np.argmax(scores, axis=0)
+            delta[t] = (
+                scores[psi[t], np.arange(S)] + B[t]
+            )
+
+        # 3. Terminate in a word-final state.
+        final_states = [
+            self.offsets[word] + self.sizes[word] - 1
+            for word in self.vocab
+        ]
+
+        last_state = max(
+            final_states,
+            key=lambda s: delta[-1, s]
+        )
+
+        # 4. Backtracking.
+        path = np.zeros(T, dtype=int)
+        path[-1] = last_state
+
+        for t in range(T - 1, 0, -1):
+            path[t - 1] = psi[t, path[t]]
+
+        # 5. Recover words from word-entry transitions.
+        words = [self.word_of_state[path[0]]]
+
+        for t in range(1, T):
+            prev_state = path[t - 1]
+            curr_state = path[t]
+
+            if self.entry[prev_state, curr_state]:
+                words.append(self.word_of_state[curr_state])
+
+        # 6. Remove silence tokens.
+        return [word for word in words if word not in drop]
 
 
 # --------------------------------------------------------------------------- #
 # Bigram LM with add-k smoothing
 # --------------------------------------------------------------------------- #
+
 def train_bigram(sentences: list[list[str]], vocab: list[str], k: float = 0.1,
                  sil_token: str | None = "sil", p_sil: float = 0.15) -> dict:
-    raise NotImplementedError("TODO(d1): add-k bigram P(v|u) with <s>; silence handled as documented; every row must sum to 1")
+    """Train an add-k bigram LM with optional silence transitions."""
+
+    from collections import Counter
+
+    words = [w for w in dict.fromkeys(vocab) if w != sil_token]
+    counts = {}
+
+    # Count transitions, including the beginning of each sentence.
+    for sentence in sentences:
+        prev = "<s>"
+
+        for word in sentence:
+            if word not in words:
+                continue
+
+            if prev not in counts:
+                counts[prev] = Counter()
+
+            counts[prev][word] += 1
+            prev = word
+
+    # Build smoothed probability distributions.
+    bigram = {}
+    V = len(words)
+
+    for prev in ["<s>"] + words:
+        row_counts = counts.get(prev, Counter())
+        total = sum(row_counts.values())
+
+        row = {
+            word: (row_counts[word] + k) / (total + k * V)
+            for word in words
+        }
+
+        if sil_token is not None:
+            row = {word: prob * (1.0 - p_sil)
+                   for word, prob in row.items()}
+            row[sil_token] = p_sil
+
+        bigram[prev] = row
+
+    # After silence, resume with a smoothed start distribution.
+    if sil_token is not None:
+        bigram[sil_token] = {
+            word: (1.0 - p_sil) * (
+                counts.get("<s>", Counter())[word] + k
+            ) / (sum(counts.get("<s>", Counter()).values()) + k * V)
+            for word in words
+        }
+        bigram[sil_token][sil_token] = p_sil
+
+    return bigram
