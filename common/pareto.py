@@ -17,10 +17,23 @@ def _to_minimisation(values: np.ndarray, directions: list[str]) -> np.ndarray:
             v[:, j] = -v[:, j]
     return v
 
-
 def pareto_mask_array(values: np.ndarray, directions: list[str]) -> np.ndarray:
     """True for non-dominated rows. O(n^2), fine for the few hundred configs of a course."""
-    raise NotImplementedError("TODO(d1): return a boolean mask of non-dominated rows (each objective 'min' or 'max'); keep exact duplicates; see test_pareto.py")
+    v = _to_minimisation(values, directions)
+    n = len(v)
+    mask = np.ones(n, dtype=bool)
+
+    for i in range(n):
+        # Compare configuration i against all other configurations.
+        dominates_i = (
+            np.all(v <= v[i], axis=1) # true pour configurations qui sont au moins aussi bonnes que i sur tous les critères
+            & np.any(v < v[i], axis=1) # true pour celles qui sont strictement meilleures sur au moins un critère
+        )
+
+        if np.any(dominates_i):
+            mask[i] = False
+
+    return mask
 
 
 def pareto_mask(df, objectives: dict[str, str]) -> np.ndarray:

@@ -25,16 +25,75 @@ class NGramLM:
         self.lambdas = lambdas or [0.6, 0.3, 0.1, 0.05, 0.05][:order]
         self.lambdas = [w / sum(self.lambdas) for w in self.lambdas]
 
+    
     def fit(self, sentences: list[list[str]], vocab: list[str]):
-        """Count n-grams of every order 1..N. Each sentence is padded with N-1 BOS and one EOS.
-        self.counts[n][ngram_tuple] = count, self.context[n][history_tuple] = count (n = 1..N)."""
-        self.vocab = list(vocab) + [EOS]  # predictable symbols
-        raise NotImplementedError("TODO(d1): count n-grams of every order 1..N on sentences padded with N-1 '<s>' and one '</s>'; fill self.counts[n] and self.context[n] (Counters keyed by tuples)")
+        """Count n-grams of every order 1..N."""
+
+        self.vocab = list(vocab) + [EOS]
+
+        # Initialise counters for each order.
+        self.counts = {
+            n: Counter() for n in range(1, self.order + 1)
+        }
+        self.context = {
+            n: Counter() for n in range(1, self.order + 1)
+        }
+
+        for sentence in sentences:
+            # Add beginning and end tokens.
+            padded = [BOS] * (self.order - 1) + list(sentence) + [EOS]
+
+            # Iterate only over predicted tokens (words + EOS).
+            for i in range(self.order - 1, len(padded)):
+                for n in range(1, self.order + 1):
+
+                    # Current n-gram ending at position i.
+                    ngram = tuple(padded[i - n + 1:i + 1])
+
+                    # History of the n-gram.
+                    history = ngram[:-1]
+
+                    self.counts[n][ngram] += 1
+                    self.context[n][history] += 1
+
         return self
 
+
+    
     def prob(self, word: str, history: list[str]) -> float:
-        """P(word | last N-1 tokens of history). history may contain BOS tokens."""
-        raise NotImplementedError("TODO(d1): 'add-k' smooths the order-N estimate (count+k)/(context+k|V|); 'interpolated' mixes the add-k estimates of orders N..1 with self.lambdas (Jelinek-Mercer)")
+        """P(word | last N-1 tokens of history)."""
+
+        V = len(self.vocab)
+
+        # Keep the last N-1 tokens and pad missing history with BOS.
+        hist = list(history[-(self.order - 1):]) if self.order > 1 else []
+        hist = [BOS] * (self.order - 1 - len(hist)) + hist
+
+        def add_k_prob(n):
+            # Use the last n-1 history tokens.
+            context = tuple(hist[-(n - 1):]) if n > 1 else ()
+
+            ngram = context + (word,)
+
+            count_ngram = self.counts[n][ngram]
+            count_context = self.context[n][context]
+
+            return (
+                (count_ngram + self.k)
+                / (count_context + self.k * V)
+            )
+
+        if self.smoothing == "add-k":
+            return add_k_prob(self.order)
+
+        # Jelinek-Mercer interpolation: N, N-1, ..., 1
+        return sum(
+            weight * add_k_prob(n)
+            for n, weight in zip(
+                range(self.order, 0, -1),
+                self.lambdas
+            )
+        )
 
     def sentence_logprob(self, sentence: list[str]) -> float:
         hist, lp = [], 0.0
@@ -43,9 +102,23 @@ class NGramLM:
             hist.append(w)
         return lp
 
+
     def perplexity(self, sentences: list[list[str]]) -> float:
         """exp(-(sum of log P) / number of predicted tokens), EOS included."""
-        raise NotImplementedError("TODO(d1): exp of minus the average log-probability per predicted token (each sentence predicts its words and EOS)")
+
+        total_logprob = 0.0
+        total_tokens = 0
+
+        for sentence in sentences:
+            total_logprob += self.sentence_logprob(sentence)
+
+            # Each sentence predicts its words and one EOS token.
+            total_tokens += len(sentence) + 1
+
+        if total_tokens == 0:
+            return float("inf")
+
+        return math.exp(-total_logprob / total_tokens)
 
     @property
     def n_entries(self) -> int:

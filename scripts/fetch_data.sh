@@ -5,7 +5,10 @@
 set -u
 TRACK="$(cat "$(dirname "$0")/TRACK" 2>/dev/null || echo all)"   # vision | speech | all
 want(){ [ "$TRACK" = all ] || [ "$TRACK" = "$1" ]; }
-D="${1:-data}"; mkdir -p "$D"; cd "$D"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+D="${1:-data}"
+mkdir -p "$D"
+cd "$D"
 ok(){ echo "  [ok] $1"; }; ko(){ echo "  [FAILED] $1 -- the related smoke steps will be skipped"; }
 
 if want speech; then
@@ -43,7 +46,8 @@ fi
 fi
 if want speech; then
 echo "== Reference on-device streaming model (sherpa-onnx zipformer, 20M params, ~130 MB) -> ../models"
-M="$(cd "$(dirname "$0")/.." && pwd)/models"; mkdir -p "$M"
+M="$ROOT/models"
+mkdir -p "$M"
 [ -d "$M/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17" ] || (cd "$M" && wget -q https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2 && tar xjf sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2 && rm sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2) && ok reference-model || ko reference-model
 echo "== LibriSpeech test-clean (346 MB) + pruned 3-gram LM (~34 MB)"
 [ -d LibriSpeech/test-clean ] || (wget -q https://www.openslr.org/resources/12/test-clean.tar.gz && tar xzf test-clean.tar.gz && rm test-clean.tar.gz) && ok librispeech || ko librispeech
