@@ -5,15 +5,19 @@
     + n-gram LM   : beam search with KenLM, sweeping alpha (LM weight) and beta (word bonus)
                     -- the same two knobs as the GMM-HMM word-loop decoder of stage 1.
 
-Install:  pip install --no-deps pyctcdecode   (its metadata pins numpy<2 and would DOWNGRADE numpy,
-          breaking librosa/scipy; it works fine with numpy 2)
-          pip install https://github.com/kpu/kenlm/archive/master.zip
+Install:  uv sync --extra lm        (pyproject.toml ignores pyctcdecode's numpy<2 pin; kenlm is compiled: README.md)
+          or, with pip:  pip install -r requirements.txt && pip install --no-deps pyctcdecode==0.5.0 && pip install kenlm
+          (pyctcdecode's metadata pins numpy<2 and would DOWNGRADE numpy, breaking librosa/scipy; it works fine
+          with numpy 2, hence --no-deps)
 LM:       LibriSpeech n-gram ARPA files from https://www.openslr.org/11 (the pruned 3-gram is small),
           or write_arpa_bigram() below for a toy LM trained on any text.
 
     python -m speech.ctc_lm --selftest                      # synthetic posteriors, runs on CPU in seconds
-    python -m speech.ctc_lm --librispeech /data/LibriSpeech --model facebook/wav2vec2-base-100h \
-        --arpa /data/lm/3-gram.pruned.1e-7.arpa                                       # UNTESTED here
+    python -m speech.ctc_lm --arpa data/lm/3-gram.pruned.1e-7.arpa   # LibriSpeech, wav2vec2-base-100h
+
+Protocol of main: logits of the 200 utterances computed once; alpha x beta x beam swept on the first half (dev);
+the best point is decoded once on the other half (test). Rows go to results/results.jsonl (task "ctc_decoding",
+cfg_split dev or test). Defaults: --librispeech data/LibriSpeech, --device cuda if available else cpu.
 """
 from __future__ import annotations
 
@@ -25,10 +29,19 @@ from pathlib import Path
 
 import numpy as np
 
+from common.bench import default_device
+
 
 # --------------------------------------------------------------------------- #
 def greedy_ctc(logprobs: np.ndarray, labels: list[str], blank: int = 0) -> str:
-    raise NotImplementedError("TODO(d2): argmax per frame, collapse repeats, drop blanks, '|' = space")
+    """Greedy CTC decoding (L3, "Greedy decoding"): the best label of every frame, then the collapse B.
+    logprobs: (T, number of labels); labels[i] is the token of id i; blank: the id of the blank."""
+    raise NotImplementedError("TODO(d2): best = one label id per frame: the argmax of logprobs over its last axis (the labels), shape (T,)")
+    out, prev = [], -1
+    for k in best:
+        raise NotImplementedError("TODO(d2): collapse: keep labels[k] (append it to out) only if k differs from the previous id prev and is not the blank")
+        prev = k
+    return "".join(out).replace("|", " ").strip()  # the word delimiter | becomes a space
 
 
 def labels_from_processor(processor) -> tuple[list[str], int]:
@@ -65,7 +78,7 @@ def write_arpa_bigram(sentences: list[list[str]], path: Path, discount: float = 
     for (u, w), c in bi.items():
         p = max(c - discount, 0) / follow[u] + bo[u] * p_uni[w]
         lines_bi.append(f"{math.log10(p):.6f}\t{u} {w}")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8", newline="\n") as f:  # LF on Windows too: kenlm reads the ARPA
         f.write("\\data\\\n")
         f.write(f"ngram 1={len(p_uni) + 1}\nngram 2={len(lines_bi)}\n\n\\1-grams:\n")
         f.write(f"-99\t<s>\t{math.log10(bo['<s>']):.6f}\n")
@@ -81,8 +94,30 @@ def make_decoder(labels, arpa: str | None, alpha: float, beta: float):
 
 
 def sweep(logprobs_list, refs, labels, blank, arpa, alphas, betas, beams, unigrams=None):
-    """Returns rows: decoder, alpha, beta, beam, WER, ms per utterance."""
-    raise NotImplementedError("TODO(d2): rows for greedy, beam without LM (each beam width) and beam + KenLM (alpha x beta x beam): WER and ms per utterance")
+    """Decode every utterance with each decoder; one row (a dict) per decoder configuration, in this order:
+      - decoder="greedy (acoustic only)", alpha=0, beta=0, beam=1;
+      - decoder="beam, no LM", alpha=0, beta=0, for each beam in beams;
+      - decoder="beam + n-gram", for each alpha x beta x beam, only when arpa is given.
+    Keys: decoder, alpha, beta, beam, wer (jiwer.wer over all utterances; an empty hypothesis counts as "<e>"),
+    ms_per_utt (decoding time per utterance). The decoder names are used by the tests and the plots: keep them.
+    unigrams: unused (kept for compatibility)."""
+    import jiwer
+    rows = []
+    # the first row, as an example: time the decoding of every utterance, then one dict per configuration
+    t0 = time.perf_counter()
+    hyp = [greedy_ctc(lp, labels, blank) for lp in logprobs_list]
+    rows.append(dict(decoder="greedy (acoustic only)", alpha=0, beta=0, beam=1, wer=jiwer.wer(refs, [h or "<e>" for h in hyp]),
+                     ms_per_utt=(time.perf_counter() - t0) / len(refs) * 1000))
+    for beam in beams:
+        dec = make_decoder(labels, None, 0.0, 0.0)  # prefix beam search without LM (pyctcdecode)
+        raise NotImplementedError("TODO(d2): same as the greedy row with hyp = [dec.decode(lp, beam_width=beam) for lp in logprobs_list]: one row decoder='beam, no LM', alpha=0, beta=0, beam=beam")
+    if arpa:
+        for a in alphas:
+            for b in betas:
+                dec = make_decoder(labels, arpa, a, b)  # beam search with the n-gram LM, weight a, word bonus b
+                for beam in beams:
+                    raise NotImplementedError("TODO(d2): as above: one row decoder='beam + n-gram', alpha=a, beta=b, beam=beam")
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -157,25 +192,34 @@ def librispeech_logits(root, model_id, n, device):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--librispeech", type=Path)
+    ap.add_argument("--librispeech", type=Path, default=Path("data/LibriSpeech"))
     ap.add_argument("--model", default="facebook/wav2vec2-base-100h")
     ap.add_argument("--arpa")
     ap.add_argument("--n", type=int, default=200)
-    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--device", default=default_device())
     ap.add_argument("--out", type=Path, default=Path("results/speech_ctc_lm"))
     ap.add_argument("--jsonl", type=Path, default=Path("results/results.jsonl"))
     args = ap.parse_args()
     if args.selftest:
         return selftest(args.out)
     import pandas as pd
+    from common.bench import BenchRecord, log_record
     lps, refs, labels, blank = librispeech_logits(args.librispeech, args.model, args.n, args.device)
-    rows = sweep(lps, refs, labels, blank, args.arpa, alphas=[0.3, 0.5, 1.0, 2.0], betas=[0.0, 1.0, 2.0],
-                 beams=[10, 50, 100])
+    half = len(refs) // 2  # the utterances are already shuffled (load_librispeech): dev = first half, test = the rest
+    dev = sweep(lps[:half], refs[:half], labels, blank, args.arpa, alphas=[0.3, 0.5, 1.0, 2.0], betas=[0.0, 1.0, 2.0],
+                beams=[10, 50, 100])
+    best = min((r for r in dev if r["decoder"] != "greedy (acoustic only)"), key=lambda r: r["wer"])
+    print(f"best on dev ({half} utterances): {best}")
+    test = sweep(lps[half:], refs[half:], labels, blank, args.arpa if best["decoder"] == "beam + n-gram" else None,
+                 alphas=[best["alpha"]], betas=[best["beta"]], beams=[best["beam"]])
+    rows = [dict(split="dev", **r) for r in dev] + [dict(split="test", **r) for r in test]
+    print(pd.DataFrame(rows[-len(test):]).round(4).to_string(index=False))
     args.out.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(args.out / f"ctc_lm_{args.model.split('/')[-1]}.csv", index=False)
-    from common.bench import BenchRecord, log_record
     for r in rows:
-        log_record(BenchRecord("ctc_decoding", f"{args.model}|{r['decoder']}", dict(alpha=r["alpha"], beta=r["beta"], beam=r["beam"]),
+        log_record(BenchRecord("ctc_decoding", f"{args.model}|{r['decoder']}",
+                               dict(alpha=r["alpha"], beta=r["beta"], beam=r["beam"], split=r["split"],
+                                    n=half if r["split"] == "dev" else len(refs) - half, device=args.device),
                                dict(wer=r["wer"], ms_per_utt=r["ms_per_utt"])), args.jsonl)
 
 
