@@ -64,10 +64,17 @@ def bench_model(model_id, data, batch, device, fp16):
     with energy_scope(res):
         t_all = time.perf_counter()
         for i in range(0, len(inputs), batch):
-            raise NotImplementedError("TODO(d2): time one call of asr on fresh copies of inputs[i:i + batch] (batch_size=batch): t0 = time.perf_counter(), call, cuda_sync(), append the elapsed seconds to lats; add each output's 'text' to hyps")
+            chunk = [dict(x) for x in inputs[i:i + batch]]  # copies fraîches : le pipeline les consomme
+            t0 = time.perf_counter()
+            out = asr(chunk, batch_size=batch)
+            cuda_sync()                                      # attendre la fin réelle du travail GPU
+            lats.append(time.perf_counter() - t0)
+            hyps.extend(o["text"] for o in out)
         total = time.perf_counter() - t_all
-    audio_s = sum(len(d["audio"]) / d["sr"] for d in data)  # seconds of audio transcribed
-    raise NotImplementedError("TODO(d2): wer_value = wer(references, hyps) with the references d['text'] (speech.data.wer normalises both); rtf = processing time / audio time")
+    audio_s = sum(len(d["audio"]) / d["sr"] for d in data)
+    references = [d["text"] for d in data]
+    wer_value = wer(references, hyps)
+    rtf = total / audio_s
     m = dict(wer=wer_value, rtf=rtf, n_params_M=n_params / 1e6,
              energy_j_per_audio_min=(res["energy_j"] / audio_s * 60) if res.get("energy_j") is not None else None)
     m.update(summarize_latencies(lats))  # lat_p50_ms, lat_p90_ms, ... from the list of seconds
