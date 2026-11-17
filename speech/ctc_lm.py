@@ -36,10 +36,11 @@ from common.bench import default_device
 def greedy_ctc(logprobs: np.ndarray, labels: list[str], blank: int = 0) -> str:
     """Greedy CTC decoding (L3, "Greedy decoding"): the best label of every frame, then the collapse B.
     logprobs: (T, number of labels); labels[i] is the token of id i; blank: the id of the blank."""
-    raise NotImplementedError("TODO(d2): best = one label id per frame: the argmax of logprobs over its last axis (the labels), shape (T,)")
+    best = np.argmax(logprobs, axis=-1)
     out, prev = [], -1
     for k in best:
-        raise NotImplementedError("TODO(d2): collapse: keep labels[k] (append it to out) only if k differs from the previous id prev and is not the blank")
+        if k != prev and k != blank:
+            out.append(labels[k])
         prev = k
     return "".join(out).replace("|", " ").strip()  # the word delimiter | becomes a space
 
