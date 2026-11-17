@@ -113,7 +113,7 @@ def sweep(logprobs_list, refs, labels, blank, arpa, alphas, betas, beams, unigra
         dec = make_decoder(labels, None, 0.0, 0.0)
         t0 = time.perf_counter()
         hyp = [dec.decode(lp, beam_width=beam) for lp in logprobs_list]
-        rows.append(dict(decoder=dec, alpha=0, beta=0, beam=beam,
+        rows.append(dict(decoder="beam, no LM", alpha=0, beta=0, beam=beam,
                     wer=jiwer.wer(refs, [h or "<e>" for h in hyp]),
                     ms_per_utt=(time.perf_counter() - t0) / len(refs) * 1000))
     if arpa:
@@ -123,7 +123,7 @@ def sweep(logprobs_list, refs, labels, blank, arpa, alphas, betas, beams, unigra
                 for beam in beams:
                     t0 = time.perf_counter()
                     hyp = [dec.decode(lp, beam_width=beam) for lp in logprobs_list]
-                    rows.append(dict(decoder=dec, alpha=a, beta=b, beam=beam,
+                    rows.append(dict(decoder="beam + n-gram", alpha=a, beta=b, beam=beam,
                         wer=jiwer.wer(refs, [h or "<e>" for h in hyp],
                         ms_per_utt=(time.perf_counter() - t0) / len(refs) * 1000))
                     )
