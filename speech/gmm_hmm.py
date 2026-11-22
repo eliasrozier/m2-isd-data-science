@@ -168,7 +168,8 @@ def recognise_isolated(wm: WordModels, feats: np.ndarray, vocab: list[str]) -> s
 # --------------------------------------------------------------------------- #
 class WordLoopDecoder:
     def __init__(self, wm: WordModels, vocab: list[str], bigram: dict | None = None,
-                 lm_weight: float = 1.0, word_penalty: float = 0.0, exit_logp: float = np.log(0.5)):
+                 lm_weight: float = 1.0, word_penalty: float = 0.0, exit_logp: float = np.log(0.5),
+                 beam: float = np.inf, n_beam: int | None = None):
         self.vocab = vocab
         self.wm = wm
         self.offsets, self.sizes = {}, {}
@@ -185,8 +186,29 @@ class WordLoopDecoder:
             bigram = {u: {v: 1.0 / V for v in vocab} for u in ["<s>"] + vocab}
         self.bigram = bigram
         self.lm_weight, self.word_penalty, self.exit_logp = lm_weight, word_penalty, exit_logp
+        self.beam, self.n_beam = beam, n_beam
+        self.finals = np.array([self.offsets[w] + self.sizes[w] - 1 for w in vocab])
+        self.n_active: list[int] = []  # filled by prune(): number of states kept at each frame
+        self.final_score = -np.inf  # filled by prune(): best word-final score at the last frame pruned
         self._build()
 
+    def prune(self, delta: np.ndarray) -> np.ndarray:
+        """Beam pruning (provided). Call it on delta at EVERY frame, right after computing it, and continue
+        with what it returns. Score beam: keep s iff delta[s] >= max(delta) - self.beam. Top-N beam: keep the
+        self.n_beam best states. Pruned states get -inf. With the defaults (beam=inf, n_beam=None) it changes
+        nothing, so exact Viterbi is the default. It also records the cost (self.n_active, one entry per frame)
+        and self.final_score, so that run_classical_baseline --part beam can measure search errors."""
+        if np.isfinite(self.beam):
+            delta = np.where(delta >= delta.max() - self.beam, delta, -np.inf)
+        if self.n_beam is not None and self.n_beam < len(delta):
+            keep = np.argpartition(-delta, self.n_beam - 1)[:self.n_beam]
+            kept = np.full_like(delta, -np.inf)
+            kept[keep] = delta[keep]
+            delta = kept
+        self.n_active.append(int(np.isfinite(delta).sum()))
+        self.final_score = float(delta[self.finals].max())
+        return delta
+    
     def _lm(self, u, v):
         return self.lm_weight * np.log(max(self.bigram[u].get(v, 1e-12), 1e-12)) + self.word_penalty
 
@@ -258,51 +280,54 @@ class WordLoopDecoder:
     def decode(self, feats: np.ndarray, drop: tuple = ("sil",)) -> list[str]:
         return self.decode_emissions(self.emissions(feats), drop)
 
-    
-    def decode_emissions(self, B: np.ndarray,
-                        drop: tuple = ("sil",)) -> list[str]:
-        """Decode emissions using log-domain Viterbi."""
+
+    def decode_emissions(
+        self,
+        B: np.ndarray,
+        drop: tuple = ("sil",)
+    ) -> list[str]:
+        """Log-domain Viterbi with optional beam pruning."""
 
         T, S = B.shape
+
+        self.n_active = []
+        self.final_score = -np.inf
 
         if T == 0:
             return []
 
-        # Viterbi scores and backpointers.
         delta = np.full((T, S), -np.inf)
         psi = np.zeros((T, S), dtype=int)
 
-        # 1. Initialisation.
-        delta[0] = self.logpi + B[0]
+        # 1. Initialization
+        delta[0] = self.prune(self.logpi + B[0])
 
-        # 2. Recursion.
+        # 2. Viterbi recursion
         for t in range(1, T):
             scores = delta[t - 1][:, None] + self.logA
 
             psi[t] = np.argmax(scores, axis=0)
-            delta[t] = (
-                scores[psi[t], np.arange(S)] + B[t]
-            )
 
-        # 3. Terminate in a word-final state.
-        final_states = [
-            self.offsets[word] + self.sizes[word] - 1
-            for word in self.vocab
-        ]
+            new_delta = scores[psi[t], np.arange(S)] + B[t]
 
-        last_state = max(
-            final_states,
-            key=lambda s: delta[-1, s]
-        )
+            delta[t] = self.prune(new_delta)
 
-        # 4. Backtracking.
+        # 3. Select best final state
+        last_state = self.finals[np.argmax(delta[-1, self.finals])]
+
+        # final_score is already updated by prune()
+
+        if not np.isfinite(delta[-1, last_state]):
+            return []
+
+        # 4. Backtracking
         path = np.zeros(T, dtype=int)
         path[-1] = last_state
 
         for t in range(T - 1, 0, -1):
             path[t - 1] = psi[t, path[t]]
 
-        # 5. Recover words from word-entry transitions.
+        # 5. Recover words
         words = [self.word_of_state[path[0]]]
 
         for t in range(1, T):
@@ -312,7 +337,7 @@ class WordLoopDecoder:
             if self.entry[prev_state, curr_state]:
                 words.append(self.word_of_state[curr_state])
 
-        # 6. Remove silence tokens.
+        # 6. Remove silence tokens
         return [word for word in words if word not in drop]
 
 
