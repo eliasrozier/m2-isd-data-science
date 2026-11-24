@@ -34,7 +34,19 @@ class LocalAgreementSession(Session):
         words = self.inner.transcribe(np.concatenate(self.buf)).split()
         tail = words[len(self.committed):]    # the words after the committed ones
         self.history = (self.history + [tail])[-self.n:]
-        raise NotImplementedError("TODO(d3): agreed = local_agreement(self.history, self.n); if not empty: add it to self.committed and remove its words from the front of every hypothesis in self.history")
+        
+        agreed = local_agreement(self.history, self.n)
+
+        if agreed:
+            # Commit the stable words.
+            self.committed.extend(agreed)
+
+            # Remove committed words from each hypothesis.
+            self.history = [
+                hypothesis[len(agreed):]
+                for hypothesis in self.history
+            ]
+
         return " ".join(self.committed + self.history[-1])
 
     def finish(self):
@@ -43,7 +55,10 @@ class LocalAgreementSession(Session):
         if not self.buf:
             return " ".join(self.committed)
         words = self.inner.transcribe(np.concatenate(self.buf)).split()
-        raise NotImplementedError("TODO(d3): return the committed words followed by the words of the final hypothesis after the len(self.committed) first ones, joined by spaces")
+        
+        return " ".join(
+            self.committed + words[len(self.committed):]
+        )
 
 
 class _Probe(OfflineBackend):

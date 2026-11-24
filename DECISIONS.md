@@ -24,3 +24,17 @@ It dominates all six offline re-decoding configurations on these two objectives 
 We therefore select FastConformer 114M INT8 as our deployment candidate.
 
 This decision is limited to the evaluated utterances and hardware. Further validation should include more recordings, noisy conditions, memory consumption and latency variability.
+
+## Day 3 Afternoon — Live ASR Demonstration
+
+We integrated our Day 2 CTC decoder with a 3-gram language model into the provided ASR demonstration framework. We compared it with Whisper Tiny, wav2vec2 Greedy, and the FastConformer 114M INT8 reference model.
+
+The first demonstration was conducted in a noisy environment. The offline replay produced a WER of 0% for Whisper Tiny and 38% for both CTC configurations. FastConformer, tested through live microphone input, achieved a WER of 25%, with a first-partial delay of 3.024 seconds and a final latency of 149 milliseconds.
+
+These results are preliminary because the live and replay conditions were not identical. They cannot support a direct ranking of the models.
+
+The experiment confirmed that FastConformer can provide partial transcriptions while speech is still being recorded, whereas our offline CTC backend returns its transcription after the recording ends.
+
+We plan to repeat the experiment in a quieter environment, using the same audio recording across all backends to ensure a fair comparison.
+
+The larger Day 3 benchmark remains the primary evidence for our deployment decision.

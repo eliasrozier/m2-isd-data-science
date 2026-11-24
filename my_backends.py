@@ -26,3 +26,34 @@ Same contract as the provided ones (asr_demo/contract.py). Uncomment and adapt (
 #         ...                                   # load the model ONCE
 #     def transcribe(self, audio: np.ndarray) -> str:
 #         ...
+"""Student ASR backends for Day 3."""
+
+from asr_demo.backends import CTCWithLM, register
+
+# Day 2: CTC decoder with a 3-gram language model.
+register(
+    "student/ctc+3gram",
+    "Our Day 2 wav2vec2 CTC + 3-gram language model"
+)(
+    lambda: CTCWithLM(
+        model_id="facebook/wav2vec2-base-100h",
+        arpa="lm/3-gram.pruned.1e-7.arpa",
+        alpha=0.5,
+        beta=1.0,
+        beam=10
+    )
+)
+
+from asr_demo.backends import get, register
+from speech.streaming_live import LocalAgreementBackend
+
+register(
+    "student/local-agreement(ctc+3gram)",
+    "Our CTC + 3-gram with LocalAgreement-2, step=0.5s"
+)(
+    lambda: LocalAgreementBackend(
+        get("student/ctc+3gram"),
+        step_s=0.5,
+        n_agree=2
+    )
+)
